@@ -1,0 +1,205 @@
+Lab 13: Managing Ceph Authentication with CephX
+Objectives
+By the end of this lab, students will be able to:
+
+Understand the CephX authentication mechanism and its security benefits
+Configure CephX authentication for secure client and service communication
+Create and manage Ceph client credentials and keyrings
+Implement proper access control policies for different user types
+Test authentication mechanisms and validate access control through controlled failure testing
+Prerequisites
+Before starting this lab, students should have:
+
+Basic understanding of Ceph storage architecture (monitors, OSDs, pools)
+Familiarity with Linux command-line operations
+Knowledge of file permissions and user management concepts
+Understanding of public-key cryptography basics
+Completed previous Ceph labs or equivalent experience
+Access to a functioning Ceph cluster (minimum 3 nodes) with the ceph and rados CLI tools available on the admin node
+No additional package installation is required beyond the pre-installed Ceph toolset described below.
+
+Lab Environment
+Ready-to-Use Cloud Machines: Al Nafi provides pre-configured Linux-based cloud machines with Ceph already installed. Simply click Start Lab to begin - no need to build your own virtual machines or install software.
+
+Your lab environment includes:
+
+3 Ceph nodes (ceph-node1, ceph-node2, ceph-node3)
+Pre-installed Ceph Octopus or newer version
+Administrative access to all nodes
+Network connectivity between all nodes
+Task 1: Set up CephX for Secure Client and Service Authentication
+Subtask 1.1: Verify Current Authentication Status
+First, let's examine the current authentication configuration in your Ceph cluster.
+
+Connect to the admin node:
+ssh ceph-admin@ceph-node1
+Check current authentication settings:
+ceph auth list
+Verify cluster authentication configuration:
+ceph config get mon auth_cluster_required
+ceph config get mon auth_service_required
+ceph config get mon auth_client_required
+Display current cluster status:
+ceph -s
+Deliverable: Capture the output of ceph auth list and the three ceph config get commands. Expected result: all three values should return cephx (or none if authentication has not yet been enabled, which you will fix in the next subtask), and ceph -s should show HEALTH_OK or HEALTH_WARN with no connectivity errors.
+
+Subtask 1.2: Enable CephX Authentication
+If CephX is not already enabled, we'll configure it properly.
+
+Set authentication requirements for all components:
+ceph config set global auth_cluster_required cephx
+ceph config set global auth_service_required cephx
+ceph config set global auth_client_required cephx
+Verify the authentication settings:
+ceph config dump | grep auth
+Restart Ceph services to apply changes (if needed):
+sudo systemctl restart ceph-mon@$(hostname)
+sudo systemctl restart ceph-mgr@$(hostname)
+sudo systemctl restart ceph-osd@*
+Deliverable: The output of ceph config dump | grep auth must show cephx for auth_cluster_required, auth_service_required, and auth_client_required. After restarting services, ceph -s should still report a healthy cluster, confirming CephX is active and services have reconnected successfully.
+
+Subtask 1.3: Understand CephX Key Management
+Examine the admin keyring:
+sudo cat /etc/ceph/ceph.client.admin.keyring
+List all authentication keys:
+ceph auth list
+Check monitor keyring:
+sudo ceph-authtool --list /etc/ceph/ceph.mon.keyring
+Deliverable: Identify and record the key value and capabilities (caps) for client.admin and mon.. Expected result: client.admin should show caps mon = "allow *", caps osd = "allow *", and caps mds = "allow *", confirming it is a full-privilege administrative identity.
+
+Task 2: Manage Ceph Client Credentials
+Subtask 2.1: Create Custom Client Users
+Now we'll create different types of client users with specific permissions.
+
+Create a read-only client user:
+ceph auth get-or-create client.readonly mon 'allow r' osd 'allow r'
+Create a client user with pool-specific access:
+# First, create a test pool if it doesn't exist
+ceph osd pool create testpool 32 32
+
+# Create user with access only to testpool
+ceph auth get-or-create client.testuser mon 'allow r' osd 'allow rw pool=testpool'
+Create a backup client with broader permissions:
+ceph auth get-or-create client.backup mon 'allow r' osd 'allow rw' mds 'allow rw'
+Verify the new users were created:
+ceph auth list | grep client
+Deliverable: The ceph auth list | grep client output must show four entries: client.admin, client.readonly, client.testuser, and client.backup, each with the caps you assigned. This confirms three new identities with distinct, deliberately scoped permission levels now exist in the cluster.
+
+Subtask 2.2: Export and Manage Keyrings
+Export individual client keyrings:
+# Export readonly client keyring
+ceph auth get client.readonly -o /tmp/ceph.client.readonly.keyring
+
+# Export testuser client keyring
+ceph auth get client.testuser -o /tmp/ceph.client.testuser.keyring
+
+# Export backup client keyring
+ceph auth get client.backup -o /tmp/ceph.client.backup.keyring
+Verify keyring contents:
+cat /tmp/ceph.client.readonly.keyring
+cat /tmp/ceph.client.testuser.keyring
+cat /tmp/ceph.client.backup.keyring
+Create a combined keyring file:
+# Create a new keyring with multiple clients
+sudo ceph-authtool --create-keyring /tmp/ceph.client.combined.keyring
+
+# Add clients to the combined keyring
+sudo ceph-authtool /tmp/ceph.client.combined.keyring --import-keyring /tmp/ceph.client.readonly.keyring
+sudo ceph-authtool /tmp/ceph.client.combined.keyring --import-keyring /tmp/ceph.client.testuser.keyring
+
+# Verify combined keyring
+sudo ceph-authtool --list /tmp/ceph.client.combined.keyring
+Deliverable: Three individual keyring files in /tmp plus one combined keyring. Expected result: ceph-authtool --list /tmp/ceph.client.combined.keyring should display both client.readonly and client.testuser entries with their respective keys and caps, proving multiple identities can be consolidated into a single keyring file for distribution.
+
+Subtask 2.3: Modify Client Permissions
+Update permissions for an existing client:
+# Add MDS permissions to testuser
+ceph auth caps client.testuser mon 'allow r' osd 'allow rw pool=testpool' mds 'allow r'
+Verify the permission changes:
+ceph auth get client.testuser
+Create a client with time-limited access (using caps):
+# Create a temporary user with limited scope
+ceph auth get-or-create client.temporary mon 'allow r' osd 'allow rw pool=testpool'
+Deliverable: ceph auth get client.testuser must now show caps mds = "allow r" in addition to the original mon and osd caps, confirming that capabilities can be modified after initial creation without recreating the user or its key.
+
+Task 3: Test Access Control and Data Security
+Subtask 3.1: Test Read-Only Access
+Test the readonly client:
+# Try to list pools with readonly client
+ceph --id readonly osd lspools
+
+# Try to create a pool (this should fail)
+ceph --id readonly osd pool create unauthorized-pool 32 32
+Test object operations with readonly client:
+# Create a test object using admin credentials
+echo "test data" | rados -p testpool put test-object -
+
+# Try to read the object with readonly client
+rados --id readonly -p testpool get test-object /tmp/readonly-test.txt
+cat /tmp/readonly-test.txt
+
+# Try to write with readonly client (this should fail)
+echo "unauthorized write" | rados --id readonly -p testpool put unauthorized-object -
+Deliverable: The pool listing and object read must succeed (showing test data in /tmp/readonly-test.txt), while the pool creation and object write attempts must fail with a permission error similar to:
+
+Error EACCES: access denied
+This confirms the client.readonly identity is correctly restricted to read-only operations at both the monitor and OSD level.
+
+Subtask 3.2: Test Pool-Specific Access
+Test testuser access to authorized pool:
+# This should work - testuser has access to testpool
+echo "authorized data" | rados --id testuser -p testpool put authorized-object -
+
+# Verify the object was created
+rados --id testuser -p testpool ls
+Test testuser access to unauthorized pool:
+# Create another pool for testing
+ceph osd pool create restrictedpool 32 32
+
+# Try to access restrictedpool with testuser (this should fail)
+echo "unauthorized data" | rados --id testuser -p restrictedpool put unauthorized-object -
+Verify access restrictions:
+# List what pools testuser can see
+rados --id testuser lspools
+Deliverable: The write to testpool must succeed and authorized-object must appear in the rados --id testuser -p testpool ls output. The write to restrictedpool must fail with an access-denied error such as:
+
+error putting restrictedpool/unauthorized-object: (1) Operation not permitted
+This demonstrates that pool-scoped OSD capabilities (osd 'allow rw pool=testpool') strictly limit a client to its assigned pool, even though the client can still see other pool names via mon 'allow r'.
+
+Subtask 3.3: Test Authentication Failures
+In this subtask you will deliberately construct an invalid keyring and confirm that Ceph correctly rejects it, validating that CephX is actively enforcing authentication rather than silently allowing access.
+
+Create a fake keyring with a syntactically valid but invalid key:
+echo "[client.fake]" > /tmp/fake.keyring
+echo "    key = AQBXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX==" >> /tmp/fake.keyring
+Attempt to authenticate using the fake keyring (this should fail):
+ceph --keyring /tmp/fake.keyring --id fake -s
+Expected output is an authentication error similar to:
+
+2024-01-01T12:00:00.000+0000 7f8e8c0a0700 -1 monclient(hunting): handle_auth_bad_method server allowed_methods [2] but i only support [2]
+[errno 13] RADOS permission denied (error connecting to the cluster)
+or:
+
+unable to authenticate: (1) Operation not permitted
+Attempt the same operation against a specific pool to confirm the failure is authentication-related, not authorization-related:
+rados --keyring /tmp/fake.keyring --id fake -p testpool ls
+Expected result: the command fails immediately during the authentication handshake, before any pool-level permission check can even occur, confirming that CephX rejects the connection at the identity-verification stage rather than at the capability-check stage.
+
+Confirm the fake identity does not exist in the cluster's auth database:
+ceph auth get client.fake
+Expected output:
+
+Error ENOENT: failed to find client.fake in keyring
+This proves the fake keyring was a locally fabricated file with no corresponding entry in the monitor's authentication database, and that Ceph validates client keys against the cluster's actual auth store rather than trusting any well-formed keyring file presented to it.
+
+Deliverable: Three failed command outputs (steps 2, 3, and 4 above) each showing an authentication or lookup error, plus confirmation that legitimate clients created in Task 2 (readonly, testuser, backup) continue to authenticate successfully. Run ceph --id testuser -s as a final sanity check; it must return a healthy cluster status, proving that only the fabricated credential was rejected and the authentication system is functioning selectively and correctly.
+
+Expected Outcomes
+A Ceph cluster with CephX authentication enforced globally (cephx required for cluster, service, and client communication)
+Four distinct client identities (readonly, testuser, backup, temporary) each with verified, capability-appropriate access levels
+Documented proof, via command output, that unauthorized operations (unauthorized writes, cross-pool access, and fabricated keys) are consistently rejected by the cluster
+Troubleshooting
+If ceph --id <user> -s hangs instead of returning an immediate error, investigate the client's network path to the monitors and check whether auth_client_required was actually applied cluster-wide with ceph config dump | grep auth â what would explain a hang versus an immediate rejection?
+If a client you expected to fail (such as readonly attempting a write) instead succeeds, re-examine the exact caps string you assigned with ceph auth get client.<name> â could overlapping or overly broad capability strings (for example, allow rwx instead of allow r) be granting more access than intended?
+Conclusion
+In this lab, you configured and enforced CephX authentication across a Ceph cluster, created client identities with progressively varying permission levels, and validated those permissions through direct, hands-on testing. You confirmed that read-only clients cannot write or create pools, that pool-scoped clients cannot cross into unauthorized pools, and that a fabricated keyring is rejected outright by the cluster's authentication layer rather than being evaluated for authorization. Through this process you gained practical experience with capability-based security, keyring export and consolidation, and the distinction between authentication failures (invalid identity) and authorization failures (valid identity, insufficient permissions). As a next step, consider extending this lab by integrating CephX credentials with a CephFS or RGW deployment, or by scripting automated credential rotation to further strengthen operational security practices.
