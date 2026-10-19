@@ -1,0 +1,179 @@
+Lab: Automating Ceph Node and Pool Management with Ansible
+Objectives
+By the end of this lab, you will be able to:
+
+Configure an Ansible inventory and control node for managing a Ceph cluster
+Write an Ansible playbook to add a new OSD node to an existing Ceph cluster
+Write an Ansible playbook to create and verify a Ceph storage pool
+Apply infrastructure-as-code practices (idempotency, variables, safety checks) to Ceph administration
+Prerequisites
+Before starting this lab, you should have:
+
+Basic understanding of Ceph storage architecture (OSDs, MONs, pools)
+Familiarity with Linux command line operations and YAML syntax
+Basic understanding of Ansible concepts (inventory, playbooks, tasks, modules)
+SSH key-based access already configured between the control node and cluster nodes
+This lab uses a pre-provisioned lab environment consisting of one Ansible control node and a 3-node Ceph cluster (already deployed and healthy) with one spare, unused disk (/dev/sdb) on each Ceph node reserved for this exercise. No manual Ceph installation is required.
+
+Install Ansible on the control node if it is not already present:
+
+sudo apt update
+sudo apt install -y ansible
+ansible --version
+Task 1: Configure Ansible and Add a New OSD
+In this task you will set up the inventory, then write and run a playbook that adds a new OSD using an existing free disk on a cluster node.
+
+Step 1.1: Create the inventory
+mkdir -p ~/ceph-ansible
+cd ~/ceph-ansible
+
+cat > inventory.ini << 'EOF'
+[ceph-mon]
+ceph-node1 ansible_host=10.0.1.10 ansible_user=student
+
+[ceph-osd]
+ceph-node1 ansible_host=10.0.1.10 ansible_user=student
+ceph-node2 ansible_host=10.0.1.11 ansible_user=student
+ceph-node3 ansible_host=10.0.1.12 ansible_user=student
+
+[all:vars]
+ansible_ssh_private_key_file=~/.ssh/id_rsa
+ansible_ssh_common_args='-o StrictHostKeyChecking=no'
+EOF
+Deliverable: confirm connectivity to every node.
+
+ansible all -i inventory.ini -m ping
+Expected result: each host (ceph-node1, ceph-node2, ceph-node3) returns "ping": "pong" with a SUCCESS status.
+
+Step 1.2: Write the OSD addition playbook
+Create add-osd.yml. This playbook targets a single OSD node (passed as -l), checks that the target disk exists and is not already part of an OSD, then creates the OSD using ceph-volume. It is safe to re-run: if the disk is already in use, the creation step is skipped.
+
+cat > add-osd.yml << 'EOF'
+---
+- name: Add a new OSD to the Ceph cluster
+  hosts: ceph-osd
+  become: yes
+  gather_facts: yes
+
+  vars:
+    osd_device: /dev/sdb
+
+  tasks:
+    - name: Verify the target device exists
+      stat:
+        path: "{{ osd_device }}"
+      register: device_stat
+
+    - name: Fail if the device is missing
+      fail:
+        msg: "Device {{ osd_device }} does not exist on {{ inventory_hostname }}"
+      when: not device_stat.stat.exists
+
+    - name: Check whether the device already has a filesystem or LVM signature
+      command: blkid {{ osd_device }}
+      register: blkid_result
+      changed_when: false
+      failed_when: false
+
+    - name: Create the OSD from the raw device
+      command: ceph-volume lvm create --data {{ osd_device }}
+      register: osd_create_result
+      when: blkid_result.rc != 0
+
+    - name: Report skip reason if device was already in use
+      debug:
+        msg: "Skipping OSD creation on {{ inventory_hostname }}: {{ osd_device }} already has a signature (blkid rc=0)"
+      when: blkid_result.rc == 0
+
+    - name: Display OSD creation output
+      debug:
+        var: osd_create_result.stdout_lines
+      when: osd_create_result is defined and osd_create_result.stdout_lines is defined
+EOF
+Deliverable: run the playbook against one node and verify the OSD joined the cluster.
+
+ansible-playbook -i inventory.ini add-osd.yml -l ceph-node2
+Then, from the monitor node, confirm the new OSD is listed and the cluster is healthy:
+
+ansible ceph-mon -i inventory.ini -b -m command -a "ceph osd tree"
+ansible ceph-mon -i inventory.ini -b -m command -a "ceph health"
+Expected result: ceph osd tree shows the new OSD entry with status up and in, and ceph health reports HEALTH_OK (or HEALTH_WARN only if rebalancing is still in progress).
+
+Task 2: Create and Verify a Ceph Storage Pool
+In this task you will write a playbook that creates a replicated pool with an idempotent check, then verify the pool exists with the correct settings.
+
+Step 2.1: Write the pool creation playbook
+cat > create-pool.yml << 'EOF'
+---
+- name: Create a Ceph storage pool
+  hosts: ceph-mon
+  become: yes
+  gather_facts: no
+
+  vars:
+    pool_name: lab-rbd-pool
+    pool_pg_num: 32
+    pool_size: 3
+    pool_min_size: 2
+
+  tasks:
+    - name: Get current list of pools
+      command: ceph osd lspools
+      register: current_pools
+      changed_when: false
+
+    - name: Create the pool if it does not already exist
+      command: ceph osd pool create {{ pool_name }} {{ pool_pg_num }}
+      when: pool_name not in current_pools.stdout
+      register: pool_create_result
+
+    - name: Set pool replication size
+      command: ceph osd pool set {{ pool_name }} size {{ pool_size }}
+
+    - name: Set pool minimum size
+      command: ceph osd pool set {{ pool_name }} min_size {{ pool_min_size }}
+
+    - name: Enable the RBD application on the pool
+      command: ceph osd pool application enable {{ pool_name }} rbd
+      failed_when: false
+
+    - name: Get detailed pool information
+      command: ceph osd pool ls detail
+      register: pool_details
+      changed_when: false
+
+    - name: Display pool details
+      debug:
+        var: pool_details.stdout_lines
+EOF
+Step 2.2: Run the playbook and verify the pool
+ansible-playbook -i inventory.ini create-pool.yml
+Deliverable: confirm the pool exists with the requested settings.
+
+ansible ceph-mon -i inventory.ini -b -m command -a "ceph osd pool get lab-rbd-pool size"
+ansible ceph-mon -i inventory.ini -b -m command -a "ceph osd pool get lab-rbd-pool min_size"
+Expected result: size: 3 and min_size: 2 are returned, and lab-rbd-pool appears in the output of ceph osd lspools.
+
+Step 2.3: Confirm idempotency
+Re-run the playbook a second time without changing any variables:
+
+ansible-playbook -i inventory.ini create-pool.yml
+Expected result: the "Create the pool if it does not already exist" task reports skipped because the pool already exists, while the size, min_size, and application enable tasks report ok (or changed only on the first application-enable call), confirming the playbook is safe to re-run.
+
+Expected Outcomes
+A working Ansible inventory and control setup capable of targeting Ceph MON and OSD nodes
+A new OSD added to the cluster through an idempotent Ansible playbook, verified via ceph osd tree
+A replicated storage pool created, configured, and verified through Ansible, confirmed safe to re-run
+Troubleshooting
+Issue: ansible-playbook fails with UNREACHABLE! ... Permission denied (publickey) Fix: confirm the SSH key path in inventory.ini matches your actual key and the public key is authorized on the target host:
+
+ssh-copy-id -i ~/.ssh/id_rsa.pub student@10.0.1.11
+Issue: add-osd.yml fails with stderr: 'blkid: /dev/sdb: command not found' or the OSD creation task fails with RuntimeError: Cannot use device, already a member of LVM Fix: the disk already has data or an LVM signature; wipe it first, then re-run the playbook:
+
+ansible ceph-node2 -i inventory.ini -b -m command -a "wipefs -a /dev/sdb"
+ansible-playbook -i inventory.ini add-osd.yml -l ceph-node2
+Issue: create-pool.yml fails with Error ERANGE: pg_num N is too small or a PG-count health warning after creation Fix: lower pool_pg_num in the playbook to match cluster size (e.g. 16 for a 3-OSD cluster) and re-run:
+
+ansible-playbook -i inventory.ini create-pool.yml
+Conclusion
+In this lab, you used Ansible to automate two core Ceph administrative tasks: adding a new OSD to an existing cluster and creating a properly configured, idempotent storage pool. You built an inventory targeting MON and OSD node groups, wrote playbooks that check state before acting, and verified every change directly against the cluster using ceph osd tree, ceph health, and ceph osd pool get. These patterns â checking existing state before making changes, using variables for reusable configuration, and verifying results after each run â are the foundation of infrastructure-as-code practice for storage systems. From here, you can extend these playbooks to add MON nodes, manage multiple pools with a loop over a variable list, or integrate them into a larger site-wide playbook that manages the full cluster lifecycle.
