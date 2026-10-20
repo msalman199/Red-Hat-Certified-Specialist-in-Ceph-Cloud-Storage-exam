@@ -1,0 +1,30 @@
+apiVersion: v1
+kind: Pod
+metadata:
+  name: storage-test
+spec:
+  containers:
+  - name: storage-test
+    image: ubuntu:20.04
+    command: ["/bin/bash"]
+    args: ["-c", "apt update && apt install -y fio && fio --name=test --ioengine=libaio --rw=randwrite --bs=4k --size=1G --numjobs=4 --runtime=60 --group_reporting --filename=/data/testfile"]
+    volumeMounts:
+    - name: test-storage
+      mountPath: /data
+  volumes:
+  - name: test-storage
+    persistentVolumeClaim:
+      claimName: test-pvc
+  restartPolicy: Never
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: test-pvc
+spec:
+  accessModes:
+  - ReadWriteOnce
+  resources:
+    requests:
+      storage: 5Gi
+  storageClassName: rook-ceph-block-cloud

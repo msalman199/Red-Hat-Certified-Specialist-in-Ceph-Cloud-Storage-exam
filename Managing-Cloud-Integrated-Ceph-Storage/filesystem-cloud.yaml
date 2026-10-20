@@ -1,0 +1,25 @@
+apiVersion: ceph.rook.io/v1
+kind: CephFilesystem
+metadata:
+  name: myfs-cloud
+  namespace: rook-ceph
+spec:
+  metadataPool:
+    replicated:
+      size: 3
+  dataPools:
+  - name: replicated
+    replicated:
+      size: 3
+  preserveFilesystemOnDelete: true
+  metadataServer:
+    activeCount: 1
+    activeStandby: true
+    resources:
+      limits:
+        cpu: "2000m"
+        memory: "4Gi"
+      requests:
+        cpu: "1000m"
+        memory: "4Gi"
+    priorityClassName: system-cluster-critical

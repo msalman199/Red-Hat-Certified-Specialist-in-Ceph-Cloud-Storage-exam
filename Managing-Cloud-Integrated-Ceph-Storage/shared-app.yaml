@@ -1,0 +1,41 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: shared-storage-app
+spec:
+  replicas: 3
+  selector:
+    matchLabels:
+      app: shared-storage-app
+  template:
+    metadata:
+      labels:
+        app: shared-storage-app
+    spec:
+      containers:
+      - name: app
+        image: nginx:alpine
+        ports:
+        - containerPort: 80
+        volumeMounts:
+        - name: shared-storage
+          mountPath: /usr/share/nginx/html
+        command: ["/bin/sh"]
+        args: ["-c", "echo 'Pod: '$(hostname)' - '$(date) > /usr/share/nginx/html/index.html && nginx -g 'daemon off;'"]
+      volumes:
+      - name: shared-storage
+        persistentVolumeClaim:
+          claimName: shared-pvc
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: shared-pvc
+spec:
+  accessModes:
+  - ReadWriteMany
+  resources:
+    requests:
+      storage: 5Gi
+  storageClassName: rook-cephfs-cloud
+kubectl create -f shared-app.yaml

@@ -1,0 +1,16 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: pool-autoscaler-config
+  namespace: rook-ceph
+data:
+  config.yaml: |
+    pools:
+      - name: replicapool
+        target_ratio: 0.8
+        min_pg_num: 32
+        max_pg_num: 512
+        scale_factor: 2
+    monitoring:
+      interval: 300
+      threshold: 0.85
